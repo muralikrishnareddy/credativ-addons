@@ -27,15 +27,20 @@ class PurchaseOrder(osv.Model):
     _inherit = 'purchase.order'
 
     def allocate_check_restrict(self, cr, uid, ids, context=None):
+        if context == None:
+            context = {}
+        states = ['done']
+        if not context.get('psa_po_cancel'):
+            states.append('cancel')
         restricted_ids = []
         for purchase in self.browse(cr, uid, ids, context=context):
-            if purchase.state in ('cancel', 'done'):
+            if purchase.state in states:
                 restricted_ids.append(purchase.id)
             for line in purchase.order_line:
-                if line.state in ('cancel', 'done'):
+                if line.state in states:
                     restricted_ids.append(purchase.id)
                 for move in line.move_ids:
-                    if move.state in ('cancel', 'done'):
+                    if move.state in states:
                         restricted_ids.append(purchase.id)
         return list(set(restricted_ids))
 
@@ -56,11 +61,12 @@ class PurchaseOrderLine(osv.Model):
             self.write(cr, uid, [new_line_id], {'state': line.state}, context=context)
             if line.state not in ('draft', 'cancel'):
                 line = self.browse(cr, uid, line.id, context=context)
-                move_id = move_obj.create(cr, uid, purchase_obj._prepare_order_line_move(cr, uid, line.order_id, line, line.order_id.picking_ids[0].id, context=context))
-                move_obj.write(cr, uid, [move_id,], {'state': 'assigned'}, context=context)
-                new_line = self.browse(cr, uid, new_line_id, context=context)
-                move_id = move_obj.create(cr, uid, purchase_obj._prepare_order_line_move(cr, uid, new_line.order_id, new_line, new_line.order_id.picking_ids[0].id, context=context))
-                move_obj.write(cr, uid, [move_id,], {'state': 'assigned'}, context=context)
+                if line.order_id.picking_ids: # Bug in PO lines may cause some to be confirmed before pickings exist, only modify moves if picking exists
+                    move_id = move_obj.create(cr, uid, purchase_obj._prepare_order_line_move(cr, uid, line.order_id, line, line.order_id.picking_ids[0].id, context=context))
+                    move_obj.write(cr, uid, [move_id,], {'state': 'assigned'}, context=context)
+                    new_line = self.browse(cr, uid, new_line_id, context=context)
+                    move_id = move_obj.create(cr, uid, purchase_obj._prepare_order_line_move(cr, uid, new_line.order_id, new_line, new_line.order_id.picking_ids[0].id, context=context))
+                    move_obj.write(cr, uid, [move_id,], {'state': 'assigned'}, context=context)
             if cancel_moves:
                 move_obj.write(cr, uid, cancel_moves, {'move_dest_id': False, 'purchase_line_id': False, 'picking_id': False}, context=context)
                 move_obj.action_cancel(cr, uid, cancel_moves, context=context)
@@ -112,7 +118,7 @@ class PurchaseOrderLine(osv.Model):
 
         for order_line in order_infos.values():
             del order_line['uom_factor']
-            if len(order_line['orig_line_ids']) > 1 and order_line['state'] != 'draft':
+            if len(order_line['orig_line_ids']) > 1:
                 # Cancel old moves
                 move_ids = move_obj.search(cr, uid, [('purchase_line_id', 'in', order_line['orig_line_ids'])], context=context)
                 # Create new move and cancel old PO lines
@@ -121,8 +127,9 @@ class PurchaseOrderLine(osv.Model):
                     if first:
                         first = False
                         self.write(cr, uid, [line.id], {'product_qty': order_line['product_qty']}, context=context)
-                        move_id = move_obj.create(cr, uid, purchase_obj._prepare_order_line_move(cr, uid, line.order_id, line, line.order_id.picking_ids[0].id, context=context))
-                        move_obj.write(cr, uid, [move_id,], {'state': 'assigned'}, context=context)
+                        if line.order_id.picking_ids: # Only create moves if moves already exist - ie this is an active order
+                            move_id = move_obj.create(cr, uid, purchase_obj._prepare_order_line_move(cr, uid, line.order_id, line, line.order_id.picking_ids[0].id, context=context))
+                            move_obj.write(cr, uid, [move_id,], {'state': 'assigned'}, context=context)
                     else:
                         self.write(cr, uid, [line.id], {'state': 'cancel'}, context=context)
                         self.unlink(cr, uid, [line.id], context=context)

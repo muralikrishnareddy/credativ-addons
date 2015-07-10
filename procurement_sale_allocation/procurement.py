@@ -26,6 +26,27 @@ import netsvc
 class ProcurementOrder(osv.Model):
     _inherit = 'procurement.order'
 
+    def _verify_wkf_change(self, cr, uid, proc_id, acts, po_id, context=None):
+        query = """SELECT wa.name, wi_sub.res_id
+            FROM wkf_instance wi
+            INNER JOIN wkf_workitem ww ON ww.inst_id = wi.id
+            INNER JOIN wkf_activity wa ON wa.id = ww.act_id
+            LEFT OUTER JOIN wkf_instance wi_sub ON wi_sub.id = ww.subflow_id
+                AND wi_sub.res_type = 'purchase.order'
+            WHERE wi.res_id = %s
+            AND wi.res_type = 'procurement.order'"""
+        cr.execute(query, (proc_id,))
+        res = cr.fetchall()
+        if not res:
+            raise osv.except_osv(_('Error !'), _('Unable to find active workflow workitem for procurement id %s') % (proc_id,))
+        if len(res) > 1:
+            raise osv.except_osv(_('Error !'), _('Found multiple active workflow workitems for procurement id %s') % (proc_id,))
+        if res[0][0] not in acts:
+            raise osv.except_osv(_('Error !'), _('Unexpected procurement workflow activity %s, expected %s for procurement id %s') % (res[0][0], acts, proc_id,))
+        if res[0][1] and res[0][1] != po_id:
+            raise osv.except_osv(_('Error !'), _('Procurement id %s workflow linked to subflow for purchase id %s, should be %s') % (proc_id, res[0][1] or 'None', po_id or 'None'))
+        return True
+
     def write(self, cr, uid, ids, values, context=None):
         purchase_obj = self.pool.get('purchase.order')
         purchase_line_obj = self.pool.get('purchase.order.line')
@@ -33,9 +54,11 @@ class ProcurementOrder(osv.Model):
 
         procs = []
         if ids and 'purchase_id' in values:
-            procs = self.read(cr, uid, ids, ['purchase_id', 'name', 'procure_method', 'move_id', 'product_id'], context=context) # This must be a read since we need the 'before' data
+            procs = self.read(cr, uid, ids, ['purchase_id', 'name', 'procure_method', 'move_id', 'product_id', 'state'], context=context) # This must be a read since we need the 'before' data
         res = super(ProcurementOrder, self).write(cr, uid, ids, values, context=context)
         for proc in procs:
+            if proc['state'] in ['draft', 'confirmed', 'exception']:
+                continue
             if (proc['purchase_id'] and proc['purchase_id'][0] or False) != values['purchase_id']:
                 signal, message = None, None
                 purchase_orig = proc['purchase_id'] and purchase_obj.browse(cr, uid, [proc['purchase_id'][0]], context=context)[0] or None
@@ -48,12 +71,15 @@ class ProcurementOrder(osv.Model):
                     signal = None
                 elif not purchase_orig and purchase_new:
                     signal = 'signal_mts_mto'
+                    expected_acts = (('confirm_mts', 'make_to_stock', 'ready',), ('buy',))
                     message = _("Procurement allocated to PO (%s)") % (purchase_new.name,)
                 elif (purchase_orig and not purchase_new) or (proc['procure_method']=='make_to_order' and not purchase_new):
                     signal = 'signal_mto_mts'
+                    expected_acts = (('confirm_mto', 'buy', 'ready',), ('confirm_mts', 'cancel'))
                     message = _("Procurement deallocated from PO (%s)") % (purchase_orig.name,)
                 elif purchase_orig and purchase_new or (proc['procure_method']=='make_to_order' and purchase_new):
                     signal = 'signal_mto_mto'
+                    expected_acts = (('confirm_mto', 'buy', 'ready',), ('buy',))
                     message = _("Procurement reallocated from PO (%s) to PO (%s)") % (purchase_orig.name, purchase_new.name)
                 if signal:
                     # Check either PO is able to allow allocaitons or deallocations
@@ -70,8 +96,12 @@ class ProcurementOrder(osv.Model):
                         cr.execute('select id, wkf_id from wkf_instance where res_id=%s and res_type=%s', (proc['id'], 'procurement.order'))
                         for inst_id, wkf_id in cr.fetchall():
                             cr.execute('update wkf_workitem set state=%s where inst_id=%s', ('complete', inst_id))
+
+                    # Sanity checking to make sure we are in the correct activity before and after processing the workflow
+                    self._verify_wkf_change(cr, uid, proc['id'], expected_acts[0], purchase_orig and purchase_orig.id or False, context=context)
                     wkf_service.trg_validate(uid, 'procurement.order', proc['id'], signal, cr)
-                    # TODO: Add some sanity checking here to make sure we have gone to the expected workflow activity
+                    self._verify_wkf_change(cr, uid, proc['id'], expected_acts[1], purchase_new and purchase_new.id or False, context=context)
+
                     self.message_post(cr, uid, [proc['id']], body=message, context=context)
 
         return res
@@ -102,21 +132,25 @@ class ProcurementOrder(osv.Model):
         return True
 
     def _cancel_po_assign(self, cr, uid, ids, context=None):
+        if context == None:
+            context = {}
+        ctx = context.copy()
+        ctx.update({'from_picking': True}) # This is required to support the WMS integration - the move is not actually being cancelled, just re-arranged
         move_obj = self.pool.get('stock.move')
         purchase_line_obj = self.pool.get('purchase.order.line')
-        for proc in self.browse(cr, uid, ids, context=context):
+        for proc in self.browse(cr, uid, ids, context=ctx):
             # Find all PO lines with my stock move ID as the move_dest_id
             if not proc.move_id:
                 continue
-            pol_ids = purchase_line_obj.search(cr, uid, [('move_dest_id', '=', proc.move_id.id), ('order_id.state', '!=', 'cancel')], context=context)
+            pol_ids = purchase_line_obj.search(cr, uid, [('move_dest_id', '=', proc.move_id.id), ('order_id.state', '!=', 'cancel')], context=ctx)
             assert len(pol_ids) in (0, 1), "Found multiple purchase order lines for this procurement"
             if pol_ids:
                 # Remove the move_dest_id from this PO line and the PO lines moves
-                purchase_line_obj.write(cr, uid, [pol_ids[0]], {'move_dest_id': False}, context=context)
-                po_line = purchase_line_obj.browse(cr, uid, pol_ids[0], context=context)
-                move_ids = move_obj.search(cr, uid, [('move_dest_id', '=', proc.move_id.id), ('purchase_line_id', '=', po_line.id), ('state', '!=', 'cancel')], context=context)
-                move_obj.write(cr, uid, move_ids, {'move_dest_id': False}, context=context)
-                move_ids = move_obj.search(cr, uid, [('move_dest_id', '=', proc.move_id.id), ('purchase_line_id', '!=', False), ('state', '!=', 'cancel')], context=context)
+                purchase_line_obj.write(cr, uid, [pol_ids[0]], {'move_dest_id': False}, context=ctx)
+                po_line = purchase_line_obj.browse(cr, uid, pol_ids[0], context=ctx)
+                move_ids = move_obj.search(cr, uid, [('move_dest_id', '=', proc.move_id.id), ('purchase_line_id', '=', po_line.id), ('state', '!=', 'cancel')], context=ctx)
+                move_obj.write(cr, uid, move_ids, {'move_dest_id': False}, context=ctx)
+                move_ids = move_obj.search(cr, uid, [('move_dest_id', '=', proc.move_id.id), ('purchase_line_id', '!=', False), ('state', '!=', 'cancel')], context=ctx)
                 assert len(move_ids) == 0, "Found extra moves linked to this procurement related to other purchase orders"
                 # If there are multiple PO lines with the same product (and other merging criteria) - merge the POLs and moves togather
                 pol_ids = purchase_line_obj.search(cr, uid, [('move_dest_id', '=', False),
@@ -127,9 +161,9 @@ class ProcurementOrder(osv.Model):
                                                              ('product_id', '=', po_line.product_id.id),
                                                              ('account_analytic_id', '=', po_line.account_analytic_id.id),
                                                              ('order_id', '=', po_line.order_id.id),
-                                                             ], context=context)
+                                                             ], context=ctx)
                 if len(pol_ids) > 1:
-                    purchase_line_obj.do_merge(cr, uid, pol_ids, context=context)
+                    purchase_line_obj.do_merge(cr, uid, pol_ids, context=ctx)
         return True
 
     def _cancel_stock_assign(self, cr, uid, ids, context=None):

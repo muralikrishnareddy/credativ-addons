@@ -32,6 +32,17 @@ class PurchaseOrder(osv.osv, OrderEdit):
         'order_edit_id': fields.many2one('purchase.order', 'Edit of Order', readonly=True),
     }
 
+    def action_run_order_edit(self, cr, uid, ids, context=None):
+        if context is None:
+            context = {}
+        if not ids:
+            return {}
+        oe_obj = self.pool.get('purchase.order.edit_wizard')
+
+        context.update({'active_id': ids[0], 'active_ids': [ids[0]]})
+        oe_id = oe_obj.create(cr, uid, {}, context=context)
+        return oe_obj.edit_order(cr, uid, [oe_id], context=context)
+
     def allocate_check_restrict(self, cr, uid, ids, context=None):
         restricted_ids = super(PurchaseOrder, self).allocate_check_restrict(cr, uid, ids, context=context)
         for purchase in self.browse(cr, uid, ids, context=context):
@@ -42,12 +53,16 @@ class PurchaseOrder(osv.osv, OrderEdit):
     def copy_data(self, cr, uid, id_, default=None, context=None):
         if not default:
             default = {}
-        default['order_edit_id'] = False
+        if 'order_edit_id' not in default:
+            default['order_edit_id'] = False
         default['procurement_ids'] = []
         default['order_line_unalloc'] = []
         return super(PurchaseOrder, self).copy_data(cr, uid, id_, default, context=context)
 
     def action_picking_create(self, cr, uid, ids, context=None):
+        if self.allocate_check_restrict(cr, uid, ids, context=context):
+            raise osv.except_osv(_('Error!'),
+                _('Purchase order has become restricted and it is no longer possible to edit'))
         line_moves, remain_moves = self.check_consolidation(cr, uid, ids, context)
         res = super(PurchaseOrder, self).action_picking_create(cr, uid, ids, context=context)
         self._fixup_created_picking(cr, uid, ids, line_moves, remain_moves, context)

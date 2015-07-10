@@ -54,6 +54,18 @@ purchase_order()
 class procurement_order(osv.osv):
     _inherit = 'procurement.order'
 
+    def _planned_purchases_get_purchases(self, cr, uid, procurement, po_ids, context=None):
+        purchase_obj = self.pool.get('purchase.order')
+        company_id = self.pool.get('res.users').browse(cr, uid, uid, context=context).company_id
+        partner_id = procurement.product_id.seller_id.id
+        purchase_ids = purchase_obj.search(cr, uid, [('company_id','=', company_id.id),
+                                                ('partner_id', '=', partner_id),
+                                                ('state', 'in', ['draft']),
+                                                ('id', 'in', po_ids),
+                                                ('warehouse_id', '=', self._get_warehouse(procurement, company_id)),
+                                                ], context=context)
+        return purchase_ids
+
     def make_po(self, cr, uid, ids, context=None):
         """ Make purchase order from procurement
         @return: New created Purchase Orders procurement wise
@@ -75,7 +87,7 @@ class procurement_order(osv.osv):
         # Merge All PO's which were genereated through scheduler
         cr.execute("select id from purchase_order where state='draft' and id in (select purchase_id as id from procurement_order where state='running')")
         po_ids = map(lambda x: x[0], cr.fetchall())
-        po_obj.merge_po(cr,uid,po_ids,context=context)
+        #po_obj.merge_po(cr,uid,po_ids,context=context)
 
         for procurement in self.browse(cr, uid, ids, context=context):
             res_id = procurement.move_id.id
@@ -119,18 +131,16 @@ class procurement_order(osv.osv):
             }
 
             #Update an existing purchase order
-            po_exists = po_obj.search(cr, uid, [('company_id','=', company.id),
-                                                ('partner_id', '=', partner_id),
-                                                ('state', 'in', ['draft']),
-                                                ('id', 'in', po_ids),
-                                                ('warehouse_id', '=', self._get_warehouse(procurement, company)),
-                                                ], context=context)
+            po_exists = self._planned_purchases_get_purchases(cr, uid, procurement, po_ids, context=context)
 
             if po_exists:
                 purchase_id = po_exists[0]
                 line_vals.update({'order_id': purchase_id})
                 purchase_line_id = po_line_obj.create(cr, uid, line_vals)
                 res[procurement.id] = purchase_id
+                purchase = po_obj.browse(cr, uid, purchase_id, context=context)
+                new_origin = (purchase.origin and (purchase.origin + ' ') or '') + (procurement.origin or '')
+                po_obj.write(cr, uid, purchase_id, {'origin': new_origin}, context=context)
                 self.message_post(cr, uid, [procurement.id], body=_("Merged into existing Purchase Order"), context=context)
             else:
                 name = seq_obj.get(cr, uid, 'purchase.order') or _('PO: %s') % procurement.name

@@ -32,6 +32,26 @@ class PurchaseOrder(osv.osv):
         'force_reduce_supplier': False,
     }
 
+    def onchange_reduce_supplier(self, cr, uid, ids, force_reduce_supplier, order_line, context=None):
+        if context is None:
+            context = {}
+        pol_obj = self.pool.get('purchase.order.line')
+        line_values = []
+
+        for purchase_line in order_line:
+            if purchase_line[0] in (0, 1): # Add / Existing Update
+                purchase_line[2].update({'reduce_supplier': force_reduce_supplier})
+                line_values.append(purchase_line)
+            elif purchase_line[0] == 2: # Delete
+                line_values.append(purchase_line)
+            elif purchase_line[0] == 4: # Update
+                line_values.append((1, purchase_line[1], {'reduce_supplier': force_reduce_supplier}))
+            else:
+                raise NotImplementedError('Unable to handle lines with type %d' % (purchase_line[0],))
+
+        values = {'order_line': line_values}
+        return {'value': values }
+
 class PurchaseOrderLine(osv.osv):
     _inherit = "purchase.order.line"
 
@@ -47,9 +67,16 @@ class PurchaseOrderLine(osv.osv):
     def action_confirm(self, cr, uid, ids, context=None):
         move_obj = self.pool.get('stock.move')
         res = super(PurchaseOrderLine, self).action_confirm(cr, uid, ids, context=context)
+        reduce_data = {} # (product_id, uom_id, warehouse_id, partner_id): [qty, date, comment]
         for pol in self.browse(cr, uid, ids, context=context):
             if pol.product_id and (pol.reduce_supplier or pol.order_id.force_reduce_supplier):
-                move_obj.reduce_supplier_stock(cr, uid, pol.product_id.id, pol.product_uom.id, pol.product_qty, pol.order_id.partner_id.id, pol.order_id.warehouse_id.id, pol.order_id.date_order, pol.order_id.name, context=context)
+                key = (pol.product_id.id, pol.product_uom.id, pol.order_id.warehouse_id.id, pol.order_id.partner_id.id)
+                reduce_data.setdefault(key, [0.0, False, False])
+                reduce_data[key][0] += pol.product_qty
+                reduce_data[key][1] = pol.order_id.date_order
+                reduce_data[key][2] = pol.order_id.name
+        if reduce_data:
+            move_obj.reduce_supplier_stock(cr, uid, reduce_data, context=context)
         return res
 
 # vim:expandtab:smartindent:tabstop=4:softtabstop=4:shiftwidth=4:
