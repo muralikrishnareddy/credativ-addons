@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<openerp>
+    <data>
+    
+    <!-- Partner Form view inherited to make Reference field mandatory for a Supplier -->
+        <record model="ir.ui.view" id="partner_reference_form">
+            <field name="name">res.partner.ref.inherit</field>
+            <field name="model">res.partner</field>
+            <field name="inherit_id" ref="base.view_partner_form"/>
+            <field name="arch" type="xml">
+                <field name="ref" position="replace"/>
+                <field name="name" position="after">
+                    <h4><label for="ref" class="oe_edit_only"/></h4>
+                    <h2><field name="ref" attrs="{'required': [('supplier','=',True)]}" placeholder="Reference"/></h2>
+                </field>
+            </field>
+        </record>
+
+    <!-- Account Partner Form view inherited to make Fiscal Position field mandatory for a Supplier -->
+        <record model="ir.ui.view" id="partner_fiscal_form">
+            <field name="name">res.partner.fis.inherit</field>
+            <field name="model">res.partner</field>
+            <field name="inherit_id" ref="account.view_partner_property_form"/>
+            <field name="arch" type="xml">
+                <field name="property_account_position" position="replace"/>
+                <field name="website" position="after">
+                    <field name="property_account_position" widget="selection" attrs="{'required': [('supplier','=',True)]}"/>
+                </field>
+            </field>
+        </record>
+        
+    <!-- As Partner Form view inherited to make Fiscal Position field mandatory for a Supplier -->
+        <record id="base_vat.view_partner_form" model="ir.ui.view">
+            <field name="name">res.partner.vat.inherit</field>
+            <field name="model">res.partner</field>
+            <field name="inherit_id" ref="account.view_partner_property_form"/>
+            <field name="arch" type="xml">
+                <xpath  expr="//page[@string='Accounting']/group/group" position="inside" version="7.0">
+                    <label for="vat"/>
+                    <div name="vat_info">
+                        <field name="vat" on_change="vat_change(vat)" placeholder="e.g. BE0477472701" class="oe_inline"/>
+                        <button colspan="2" name="button_check_vat" string="Check Validity" type="object" icon="gtk-execute" class="oe_inline"/>
+                        <field name="vat_subjected" class="oe_inline"/>
+                    </div>
+                </xpath>
+            </field>
+        </record>
+
+    </data>
+</openerp>
